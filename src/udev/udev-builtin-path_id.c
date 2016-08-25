@@ -324,13 +324,24 @@ static struct udev_device *handle_scsi_ata(struct udev_device *parent, char **pa
         struct udev_device *targetdev;
         struct udev_device *target_parent;
         struct udev_device *atadev;
+        struct udev_enumerate *enumerate = NULL;
         const char *port_no;
+        const char *scsi_name;
+        char *link_name = NULL;
+        int pmp_port_no = -1;
+        bool pmp = false;
+        int err = 0;
 
         assert(parent);
         assert(path);
 
         targetdev = udev_device_get_parent_with_subsystem_devtype(parent, "scsi", "scsi_host");
         if (!targetdev)
+                return NULL;
+
+        // Kernel maps PMP port to SCSI channel / sysfs bus
+        scsi_name = udev_device_get_sysname(parent);
+        if (sscanf(scsi_name, "%*d:%d:%*d:%*d", &pmp_port_no) != 1)
                 return NULL;
 
         target_parent = udev_device_get_parent(targetdev);
@@ -346,9 +357,43 @@ static struct udev_device *handle_scsi_ata(struct udev_device *parent, char **pa
                parent = NULL;
                goto out;
         }
-        path_prepend(path, "ata-%s", port_no);
+
+        if (pmp_port_no > 0) {
+                pmp = true;
+        } else if (pmp_port_no == 0) {
+                err = asprintf(&link_name, "link%s.0", port_no);
+                if (err < 0) {
+                        link_name = NULL;
+                        parent = NULL;
+                        goto out;
+                }
+
+                enumerate = udev_enumerate_new(udev);
+                if (enumerate == NULL) {
+                        parent = NULL;
+                        goto out;
+                }
+                udev_enumerate_add_match_parent(enumerate, target_parent);
+                udev_enumerate_add_match_subsystem(enumerate, "ata_link");
+                udev_enumerate_add_match_sysname(enumerate, link_name);
+                err = udev_enumerate_scan_devices(enumerate);
+                if (err < 0) {
+                        parent = NULL;
+                        goto out;
+                }
+                if (udev_enumerate_get_list_entry(enumerate))
+                        pmp = true;
+        }
+
+        if (pmp)
+                path_prepend(path, "ata-%s-pmp%d", port_no, pmp_port_no);
+        else
+                path_prepend(path, "ata-%s", port_no);
 out:
         udev_device_unref(atadev);
+        udev_enumerate_unref(enumerate);
+        if (link_name)
+                free(link_name);
         return parent;
 }
 
