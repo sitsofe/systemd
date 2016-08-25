@@ -324,7 +324,15 @@ static struct udev_device *handle_scsi_ata(struct udev_device *parent, char **pa
         struct udev_device *targetdev;
         struct udev_device *target_parent;
         struct udev_device *atadev;
+        struct udev_device *linkdev = NULL;
         const char *port_no;
+        const char *ata_port_name;
+        const char *scsi_name;
+        const char *class;
+        char *linkdev_name = NULL;
+        int dev_no;
+        int pmp_port_no = -1;
+        int err = 0;
 
         assert(parent);
         assert(path);
@@ -333,22 +341,52 @@ static struct udev_device *handle_scsi_ata(struct udev_device *parent, char **pa
         if (!targetdev)
                 return NULL;
 
+        // Kernel maps PMP port to SCSI channel / sysfs bus
+        scsi_name = udev_device_get_sysname(parent);
+        if (sscanf(scsi_name, "%*d:%d:%*d:%*d", &pmp_port_no) != 1)
+                return NULL;
+
         target_parent = udev_device_get_parent(targetdev);
         if (!target_parent)
                 return NULL;
 
-        atadev = udev_device_new_from_subsystem_sysname(udev, "ata_port", udev_device_get_sysname(target_parent));
+        ata_port_name = udev_device_get_sysname(target_parent);
+        if (sscanf(ata_port_name, "ata%d", &dev_no) < 1)
+                return NULL;
+
+        atadev = udev_device_new_from_subsystem_sysname(udev, "ata_port", ata_port_name);
         if (!atadev)
                 return NULL;
 
         port_no = udev_device_get_sysattr_value(atadev, "port_no");
         if (!port_no) {
-               parent = NULL;
-               goto out;
+                parent = NULL;
+                goto out;
         }
-        path_prepend(path, "ata-%s", port_no);
+
+        err = asprintf(&linkdev_name, "dev%d.0", dev_no);
+        if (err < 0) {
+                linkdev_name = NULL;
+                parent = NULL;
+                goto out;
+        }
+
+        linkdev = udev_device_new_from_subsystem_sysname(udev, "ata_device", linkdev_name);
+        if (!linkdev) {
+                parent = NULL;
+                goto out;
+        }
+        class = udev_device_get_sysattr_value(linkdev, "class");
+
+        if (streq(class, "pmp"))
+                path_prepend(path, "ata-%s-pmp-%d", port_no, pmp_port_no);
+        else
+                path_prepend(path, "ata-%s", port_no);
 out:
         udev_device_unref(atadev);
+        if (linkdev_name)
+                free(linkdev_name);
+        udev_device_unref(linkdev);
         return parent;
 }
 
